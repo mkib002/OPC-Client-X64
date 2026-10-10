@@ -4,5 +4,7 @@
 *.opensdf
 *.suo
 .vscode
+.vs
 bin
 build
+out

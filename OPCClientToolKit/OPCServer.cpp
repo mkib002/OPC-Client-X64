@@ -20,6 +20,8 @@ Boston, MA  02111-1307, USA.
 
 #include "OPCServer.h"
 
+#include <algorithm>
+
 #ifdef OPCDA_CLIENT_NAMESPACE
 namespace opcda_client
 {
@@ -55,6 +57,41 @@ COPCGroup *COPCServer::makeGroup(const std::wstring &groupName, bool active, uns
 
 } // COPCServer::makeGroup
 
+bool COPCServer::removeGroupByName(const std::wstring &name)
+{
+    ATL::CComPtr<IOPCGroupStateMgt> stateMgt;
+    HRESULT result = iOpcServer->GetGroupByName(name.c_str(), IID_IOPCGroupStateMgt, (LPUNKNOWN *)&stateMgt);
+    if (FAILED(result) || !stateMgt)
+    {
+        return false; // группа не найдена (или не видна из этого соединения)
+    }
+
+    DWORD updateRate = 0;
+    BOOL active = FALSE;
+    LPWSTR groupName = nullptr;
+    LONG timeBias = 0;
+    FLOAT deadband = 0;
+    DWORD lcid = 0;
+    OPCHANDLE clientHandle = 0;
+    OPCHANDLE serverHandle = 0;
+
+    result = stateMgt->GetState(&updateRate, &active, &groupName, &timeBias, &deadband, &lcid, &clientHandle,
+                                &serverHandle);
+    if (groupName != nullptr)
+    {
+        COPCClient::comFree(groupName);
+    }
+
+    if (FAILED(result))
+    {
+        return false;
+    }
+
+    result = iOpcServer->RemoveGroup(serverHandle, TRUE);
+    return SUCCEEDED(result);
+
+} // COPCServer::removeGroupByName
+
 bool COPCServer::getItemNames(std::vector<std::wstring> &opcItemNames)
 {
     if (!iOpcNameSpace)
@@ -62,40 +99,143 @@ bool COPCServer::getItemNames(std::vector<std::wstring> &opcItemNames)
         return false;
     }
 
-    OPCNAMESPACETYPE nameSpaceType = OPC_NS_FLAT;
-    HRESULT result = iOpcNameSpace->QueryOrganization(&nameSpaceType);
-    (void)result; // mutes clang complaints..
+    // плоский браузинг (работает для плоских пространств имён
+    // и для серверов, отдающих flat-представление от корня).
+    if (browseFlat(opcItemNames) && !opcItemNames.empty())
+    {
+        return true;
+    }
 
-    USES_CONVERSION;
-    WCHAR emptyString[] = {0};
-    // result = iOpcNameSpace->ChangeBrowsePosition ( OPC_BROWSE_TO, emptyString );
-
-    ATL::CComPtr<IEnumString> iEnum;
-    result = iOpcNameSpace->BrowseOPCItemIDs(OPC_FLAT, emptyString, VT_EMPTY, 0, &iEnum);
-    if (FAILED(result))
+    // Иерархический браузинг для структурированных пространств имён в ветках
+    opcItemNames.clear();
+    if (!browseHierarchical(opcItemNames))
     {
         return false;
     }
 
-    LPWSTR name = nullptr;
-    ULONG nameSize = 0;
-    while ((result = iEnum->Next(1, &name, &nameSize)) == S_OK)
-    {
-        (void)result; // mutes clang complaints..
-        LPWSTR fullName = nullptr;
-        result = iOpcNameSpace->GetItemID(name, &fullName);
-        if (SUCCEEDED(result))
-        {
-            opcItemNames.push_back(fullName);
-            COPCClient::comFree(fullName);
-        } // if
-
-        COPCClient::comFree(name);
-    } // while
+    // Один и тот же тег сервер может отдавать и в flat-, и в иерархическом виде.
+    std::sort(opcItemNames.begin(), opcItemNames.end());
+    opcItemNames.erase(std::unique(opcItemNames.begin(), opcItemNames.end()), opcItemNames.end());
 
     return true;
 
 } // COPCServer::getItemNames
+
+bool COPCServer::browseFlat(std::vector<std::wstring> &opcItemNames)
+{
+    WCHAR emptyString[] = {0};
+
+    ATL::CComPtr<IEnumString> iEnum;
+    HRESULT result = iOpcNameSpace->BrowseOPCItemIDs(OPC_FLAT, emptyString, VT_EMPTY, 0, &iEnum);
+    if (FAILED(result) || !iEnum)
+    {
+        return false;
+    }
+
+    for (;;)
+    {
+        LPWSTR name = nullptr;
+        ULONG nameSize = 0;
+        result = iEnum->Next(1, &name, &nameSize);
+        if (result != S_OK || name == nullptr)
+        {
+            break;
+        }
+
+        LPWSTR fullName = nullptr;
+        if (SUCCEEDED(iOpcNameSpace->GetItemID(name, &fullName)) && fullName != nullptr)
+        {
+            opcItemNames.push_back(fullName);
+            COPCClient::comFree(fullName);
+        }
+
+        COPCClient::comFree(name);
+    } 
+
+    return true;
+
+} // COPCServer::browseFlat
+
+bool COPCServer::browseHierarchical(std::vector<std::wstring> &opcItemNames)
+{
+    // Возвращаемся к корню адресного пространства перед обходом.
+    WCHAR emptyString[] = {0};
+    if (FAILED(iOpcNameSpace->ChangeBrowsePosition(OPC_BROWSE_TO, emptyString)))
+    {
+        return false;
+    }
+
+    return browseHierarchicalNode(0, opcItemNames);
+
+} // COPCServer::browseHierarchical
+
+bool COPCServer::browseHierarchicalNode(int depth, std::vector<std::wstring> &opcItemNames)
+{
+
+    if (depth > 64)
+    {
+        return true;
+    }
+
+    // Листья в текущей позиции
+    {
+        ATL::CComPtr<IEnumString> iEnum;
+        HRESULT result = iOpcNameSpace->BrowseOPCItemIDs(OPC_LEAF, L"", VT_EMPTY, 0, &iEnum);
+        if (SUCCEEDED(result) && iEnum)
+        {
+            for (;;)
+            {
+                LPWSTR name = nullptr;
+                ULONG nameSize = 0;
+                result = iEnum->Next(1, &name, &nameSize);
+                if (result != S_OK || name == nullptr)
+                {
+                    break;
+                }
+
+                LPWSTR fullName = nullptr;
+                if (SUCCEEDED(iOpcNameSpace->GetItemID(name, &fullName)) && fullName != nullptr)
+                {
+                    opcItemNames.push_back(fullName);
+                    COPCClient::comFree(fullName);
+                }
+
+                COPCClient::comFree(name);
+            } 
+        }     
+    }        
+
+    // Ветки в текущей позиции обходим
+    {
+        ATL::CComPtr<IEnumString> iEnum;
+        HRESULT result = iOpcNameSpace->BrowseOPCItemIDs(OPC_BRANCH, L"", VT_EMPTY, 0, &iEnum);
+        if (SUCCEEDED(result) && iEnum)
+        {
+            for (;;)
+            {
+                LPWSTR name = nullptr;
+                ULONG nameSize = 0;
+                result = iEnum->Next(1, &name, &nameSize);
+                if (result != S_OK || name == nullptr)
+                {
+                    break;
+                }
+
+                std::wstring branchName(name);
+                COPCClient::comFree(name);
+
+                if (SUCCEEDED(iOpcNameSpace->ChangeBrowsePosition(OPC_BROWSE_DOWN, branchName.c_str())))
+                {
+                    browseHierarchicalNode(depth + 1, opcItemNames);
+                    iOpcNameSpace->ChangeBrowsePosition(OPC_BROWSE_UP, L"");
+                }
+            }    
+        }        
+    }    
+
+    return true;
+
+} // COPCServer::browseHierarchicalNode
 
 bool COPCServer::getStatus(ServerStatus &status)
 {
@@ -120,7 +260,7 @@ bool COPCServer::getStatus(ServerStatus &status)
     {
         status.vendorInfo = serverStatus->szVendorInfo;
         COPCClient::comFree(serverStatus->szVendorInfo);
-    } // if
+    }
 
     COPCClient::comFree(serverStatus);
     return true;

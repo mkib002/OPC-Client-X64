@@ -56,14 +56,18 @@ class OPCException : public ATL::CAtlException
     std::wstring ExceptionMsg;
 
   public:
-    OPCException(const std::wstring &msg, HRESULT code = 0) : ExceptionMsg(msg)
+    OPCException(const std::wstring &msg, HRESULT code = E_FAIL) : ATL::CAtlException(code), ExceptionMsg(msg)
     {
-        (void)code;
     }
 
     const std::wstring &reasonString() const
     {
         return ExceptionMsg;
+    }
+
+    HRESULT hr() const
+    {
+        return m_hr;
     }
 
 }; // OPCException

@@ -88,7 +88,7 @@ void COPCHost::getListOfDAServersEx(std::wstring hostName, tagCLSCTX serverLocat
     HRESULT result = iCatInfo->EnumClassesOfCategories(1, implist, 0, nullptr, &iEnum);
     if (FAILED(result))
     {
-        throw OPCException(L"COPCHost::getListOfDAServersEx: FAILED to get enum for categeories");
+        throw OPCException(L"COPCHost::getListOfDAServersEx: FAILED to get enum for categeories", result);
     }
 
     GUID classID = {0, 0, 0, {0}};

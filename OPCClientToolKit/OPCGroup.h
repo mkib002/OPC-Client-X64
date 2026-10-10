@@ -188,6 +188,12 @@ class OPCDACLIENT_API COPCGroup
         return iAsync2IO;
     }
 
+    /// true, если сервер поддерживает асинхронный I/O 2.0 (IOPCAsyncIO2).
+    bool asyncIO2Supported() const
+    {
+        return iAsync2IO != nullptr;
+    }
+
     ATL::CComPtr<IOPCItemMgt> &getItemManagementInterface()
     {
         return iItemManagement;

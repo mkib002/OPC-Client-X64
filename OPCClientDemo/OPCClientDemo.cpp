@@ -21,7 +21,9 @@ Free Software Foundation, Inc., 59 Temple Place - Suite 330,
 Boston, MA  02111-1307, USA.
 */
 
+#include <algorithm>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys\timeb.h>
 
 #include "OPCClient.h"
@@ -137,6 +139,12 @@ void main(void)
     std::vector<std::wstring> localServerList;
     host->getListOfDAServers(COPCClient::CATID_OPCDAv20, localServerList, localClassIdList);
 
+    if (localServerList.empty())
+    {
+        printf("no OPC DA 2.0 servers registered on the host - nothing to connect to\n");
+        return;
+    }
+
     printf("\nserver ID list:\n");
     int server_id = -1;
     for (unsigned i = 0; i < localServerList.size(); ++i)
@@ -144,7 +152,7 @@ void main(void)
         printf("%d: '%ws'\n", i, localServerList[i].c_str());
         if (localServerList[i] == L"Matrikon.OPC.Simulation.1")
         {
-            server_id = i;
+            server_id = static_cast<int>(i);
         }
     } // for
 
@@ -153,8 +161,30 @@ void main(void)
     gets_s(c_string);
     if (strlen(c_string))
     {
-        server_id = atol(c_string);
+        char *end = nullptr;
+        long requested_id = strtol(c_string, &end, 10);
+        if (end == c_string || *end != '\0')
+        {
+            printf("'%s' is not a valid server ID\n", c_string);
+            return;
+        }
+
+        if (requested_id < 0 || requested_id >= static_cast<long>(localServerList.size()))
+        {
+            printf("server ID %ld is out of range (valid IDs are 0..%d)\n", requested_id,
+                   static_cast<int>(localServerList.size()) - 1);
+            return;
+        }
+
+        server_id = static_cast<int>(requested_id);
     }
+
+    if (server_id < 0 || server_id >= static_cast<int>(localServerList.size()))
+    {
+        printf("Matrikon.OPC.Simulation.1 is not installed - enter a server ID from the list above\n");
+        return;
+    }
+
     std::wstring serverName = localServerList[server_id];
     printf("server name: '%ws'\n", serverName.c_str());
     COPCServer *opcServer = host->connectDAServer(serverName);
@@ -179,24 +209,119 @@ void main(void)
         printf("%3d: '%ws'\n", i + 1, opcItemNames[i].c_str());
     }
 
+    if (opcItemNames.empty())
+    {
+        printf("server reported an empty flat namespace - nothing to read\n");
+        return;
+    }
+
     // make demo group
     unsigned long refreshRate;
     COPCGroup *demoGroup = opcServer->makeGroup(L"DemoGroup", true, 1000, refreshRate, 0.0);
 
-    // make a single item
-    std::wstring itemName = opcItemNames[5];
-    COPCItem *readWritableItem = demoGroup->addItem(itemName, true);
+    // The demo was written against the Matrikon simulation server namespace, where the demo
+    // items happen to sit at fixed flat-namespace positions (5 / 21 / 22). Positions are
+    // server specific, so look the items up by name and fall back to what the server offers.
+    auto findItemByName = [&opcItemNames](const std::wstring &wantedName) -> size_t
+    {
+        for (size_t i = 0; i < opcItemNames.size(); ++i)
+        {
+            if (opcItemNames[i] == wantedName)
+            {
+                return i;
+            }
+        }
+        return opcItemNames.size(); // not found
+    };
+
+    // make a single item - try the Matrikon demo item first, then any item the server accepts
+    std::vector<size_t> candidateOrder;
+    const size_t preferredIdx = findItemByName(L"Bucket Brigade.UInt1");
+    if (preferredIdx < opcItemNames.size())
+    {
+        candidateOrder.push_back(preferredIdx);
+    }
+    for (size_t i = 0; i < opcItemNames.size(); ++i)
+    {
+        if (i != preferredIdx)
+        {
+            candidateOrder.push_back(i);
+        }
+    }
+
+    const size_t maxCandidates = 200; // keep the fallback search bounded on large namespaces
+    size_t rejectedCount = 0;
+    COPCItem *readWritableItem = nullptr;
+    std::wstring itemName;
+    for (size_t i = 0; i < candidateOrder.size() && i < maxCandidates && !readWritableItem; ++i)
+    {
+        std::wstring candidate = opcItemNames[candidateOrder[i]]; // addItem() wants a non-const lvalue
+        try
+        {
+            readWritableItem = demoGroup->addItem(candidate, true); // throws when the name is not a valid item
+            itemName = candidate;
+        }
+        catch (const OPCException &ex)
+        {
+            ++rejectedCount;
+            if (rejectedCount <= 5)
+            {
+                printf("'%ws' cannot be added as an item: '%ws'\n", candidate.c_str(), ex.reasonString().c_str());
+            }
+        }
+    }
+
+    if (!readWritableItem)
+    {
+        printf("no usable item found among %d browsed name(s) - cannot run the demo\n",
+               static_cast<int>(opcItemNames.size()));
+        return;
+    }
+    printf("demo item is '%ws'\n", itemName.c_str());
 
     // make several items
     std::vector<std::wstring> itemNames;
     std::vector<COPCItem *> itemsCreated;
     std::vector<HRESULT> errors;
 
-    itemNames.push_back(opcItemNames[21]); // 15 -> Bucket Brigade.UInt2
-    itemNames.push_back(opcItemNames[22]); // 16 -> Bucket Brigade.UInt4
-    if (demoGroup->addItems(itemNames, itemsCreated, errors, true) != 0)
+    const std::wstring wantedNames[] = {L"Bucket Brigade.UInt2", L"Bucket Brigade.UInt4"};
+    for (const std::wstring &wantedName : wantedNames)
     {
-        printf("add items to group FAILED\n");
+        const size_t idx = findItemByName(wantedName);
+        if (idx < opcItemNames.size())
+        {
+            itemNames.push_back(opcItemNames[idx]);
+        }
+    }
+
+    // top up with the first distinct items the server offers
+    for (size_t i = 0; i < opcItemNames.size() && itemNames.size() < 2; ++i)
+    {
+        const std::wstring &candidate = opcItemNames[i];
+        if (candidate != itemName && std::find(itemNames.begin(), itemNames.end(), candidate) == itemNames.end())
+        {
+            itemNames.push_back(candidate);
+        }
+    }
+
+    if (itemNames.empty())
+    {
+        printf("no additional items available - multi-item demo skipped\n");
+    }
+    else
+    {
+        try
+        {
+            if (demoGroup->addItems(itemNames, itemsCreated, errors, true) != 0)
+            {
+                printf("add items to group FAILED\n");
+            }
+        }
+        catch (const OPCException &ex)
+        {
+            printf("add items to group FAILED: '%ws'\n", ex.reasonString().c_str());
+            itemsCreated.clear(); // never use items that were not added to the group
+        }
     }
 
     // get properties
@@ -255,21 +380,24 @@ void main(void)
            readWritableItem->getHandle(), data.wQuality, data.vDataValue.iVal);
 
     // sync read on demo group
-    COPCItemDataMap itemDataMap;
-    demoGroup->readSync(itemsCreated, itemDataMap, OPC_DS_DEVICE);
-    POSITION pos = itemDataMap.GetStartPosition();
-    while (pos)
+    if (!itemsCreated.empty())
     {
-        OPCHANDLE handle = itemDataMap.GetKeyAt(pos);
-        OPCItemData *data = itemDataMap.GetNextValue(pos);
-        if (data)
+        COPCItemDataMap itemDataMap;
+        demoGroup->readSync(itemsCreated, itemDataMap, OPC_DS_DEVICE);
+        POSITION pos = itemDataMap.GetStartPosition();
+        while (pos)
         {
-            const COPCItem *item = data->item(); // retrieve original item pointer from item data..
-            if (item)
-                printf("-----> '%ws', handle: %u, group sync read quality %d value %d\n", item->getName().c_str(),
-                       handle, data->wQuality, data->vDataValue.iVal);
-        } // if
-    }     // while
+            OPCHANDLE handle = itemDataMap.GetKeyAt(pos);
+            OPCItemData *data = itemDataMap.GetNextValue(pos);
+            if (data)
+            {
+                const COPCItem *item = data->item(); // retrieve original item pointer from item data..
+                if (item)
+                    printf("-----> '%ws', handle: %u, group sync read quality %d value %d\n", item->getName().c_str(),
+                           handle, data->wQuality, data->vDataValue.iVal);
+            } // if
+        }     // while
+    }
 
     // enable async - must be done before any async call will work
     CMyCallback usrCallBack;
@@ -291,21 +419,24 @@ void main(void)
     demoGroup->deleteTransaction(transaction);
 
     // async read opc items from demo group
-    complete.setCompletionMessage("******* async read completion handler has been invoked (OPC group)");
-    transaction = demoGroup->readAsync(itemsCreated, &complete);
-    MESSAGE_PUMP_UNTIL(transaction->isCompleted())
-
-    for (unsigned i = 0; i < itemsCreated.size(); ++i)
+    if (!itemsCreated.empty())
     {
-        const OPCItemData *asyncData = transaction->getItemValue(itemsCreated[i]); // not owned
-        if (asyncData && !FAILED(asyncData->Error))
+        complete.setCompletionMessage("******* async read completion handler has been invoked (OPC group)");
+        transaction = demoGroup->readAsync(itemsCreated, &complete);
+        MESSAGE_PUMP_UNTIL(transaction->isCompleted())
+
+        for (unsigned i = 0; i < itemsCreated.size(); ++i)
         {
-            OPCHANDLE handle = COPCGroup::getOpcHandle(itemsCreated[i]);
-            printf("-----> '%ws', handle: %u, group async read quality %d value %d\n",
-                   itemsCreated[i]->getName().c_str(), handle, asyncData->wQuality, asyncData->vDataValue.iVal);
-        } // if
-    }     // for
-    demoGroup->deleteTransaction(transaction);
+            const OPCItemData *asyncData = transaction->getItemValue(itemsCreated[i]); // not owned
+            if (asyncData && !FAILED(asyncData->Error))
+            {
+                OPCHANDLE handle = COPCGroup::getOpcHandle(itemsCreated[i]);
+                printf("-----> '%ws', handle: %u, group async read quality %d value %d\n",
+                       itemsCreated[i]->getName().c_str(), handle, asyncData->wQuality, asyncData->vDataValue.iVal);
+            } // if
+        }     // for
+        demoGroup->deleteTransaction(transaction);
+    }
 
     // sync write
     VARIANT var;

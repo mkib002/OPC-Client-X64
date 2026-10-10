@@ -1,4 +1,7 @@
+cmake_minimum_required(VERSION 3.10)
 project(OPCClientToolKit)
+
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS OFF)
 

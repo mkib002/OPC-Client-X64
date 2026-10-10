@@ -262,25 +262,24 @@ COPCGroup::COPCGroup(const std::wstring &groupName, bool active, unsigned long r
                                                               IID_IOPCGroupStateMgt, (LPUNKNOWN *)&iStateManagement);
     if (FAILED(result))
     {
-        throw OPCException(L"COPCGroup::COPCGroup: FAILED to Add group");
+        throw OPCException(L"COPCGroup::COPCGroup: FAILED to Add group", result);
     }
 
     result = iStateManagement->QueryInterface(IID_IOPCSyncIO, (void **)&iSyncIO);
     if (FAILED(result))
     {
-        throw OPCException(L"COPCGroup::COPCGroup: FAILED to get IID_IOPCSyncIO");
+        throw OPCException(L"COPCGroup::COPCGroup: FAILED to get IID_IOPCSyncIO", result);
     }
 
-    result = iStateManagement->QueryInterface(IID_IOPCAsyncIO2, (void **)&iAsync2IO);
-    if (FAILED(result))
-    {
-        throw OPCException(L"COPCGroup::COPCGroup: FAILED to get IID_IOPCAsyncIO2");
-    }
+    // Асинхронный I/O 2.0 не обязателен: некоторые серверы (например, Mera.Recorder)
+    // его не поддерживают. При отсутствии интерфейса приложение читает значения
+    // синхронно через IOPCSyncIO::Read (см. asyncIO2Supported()).
+    iStateManagement->QueryInterface(IID_IOPCAsyncIO2, (void **)&iAsync2IO);
 
     result = iStateManagement->QueryInterface(IID_IOPCItemMgt, (void **)&iItemManagement);
     if (FAILED(result))
     {
-        throw OPCException(L"COPCGroup::COPCGroup: FAILED to get IID_IOPCItemMgt");
+        throw OPCException(L"COPCGroup::COPCGroup: FAILED to get IID_IOPCItemMgt", result);
     }
 
 } // COPCGroup::COPCGroup

@@ -86,6 +86,22 @@ class OPCDACLIENT_API COPCServer
         return iOpcProperties;
     }
 
+    /**
+     * Flat browse of the namespace (OPC_FLAT from the root). Works for flat
+     * namespaces and for servers that expose a flat view from the root.
+     */
+    bool browseFlat(std::vector<std::wstring> &opcItemNames);
+
+    /**
+     * Hierarchical browse: recursively walk all branches collecting leaf item
+     * IDs. Used as a fallback for servers whose flat browse from the root
+     * returns nothing (items live under branches, e.g. a '{flat}' branch).
+     */
+    bool browseHierarchical(std::vector<std::wstring> &opcItemNames);
+
+    /// Recursive helper for browseHierarchical().
+    bool browseHierarchicalNode(int depth, std::vector<std::wstring> &opcItemNames);
+
   public:
     /**
      * Make OPC server.
@@ -97,8 +113,8 @@ class OPCDACLIENT_API COPCServer
 
     /**
      * Browse the OPC server's namespace.
-     * This is currently done FLAT mode
-     * TODO implement browsing of structured namespace
+     * Tries a flat browse first, then falls back to a full hierarchical walk
+     * for servers that expose items only under branches.
      */
     bool getItemNames(std::vector<std::wstring> &opcItemNames);
 
@@ -112,6 +128,12 @@ class OPCDACLIENT_API COPCServer
      * get the current status of the server.
      */
     bool getStatus(ServerStatus &status);
+
+    /**
+     * Remove an existing group by name (if one exists). Used to clear a stale
+     * group before AddGroup when the server reports OPC_E_DUPLICATENAME.
+     */
+    bool removeGroupByName(const std::wstring &name);
 
 }; // COPCServer
 
